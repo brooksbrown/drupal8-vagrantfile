@@ -17,7 +17,7 @@ Vagrant.configure(2) do |config|
     TEST_DB_USER=vagrant
     TEST_DB_PASS=vagrant
     MYSQL_ROOT_PASS=vagrant
-    
+    HASH_SALT=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)    
 
     # LAMP stack setup
     #
@@ -40,27 +40,30 @@ Vagrant.configure(2) do |config|
 
     # Test database creation
     #
-    # if the database already exists, it is dropped on provisioning
-    # 
-    if mysql -u $TEST_DB_USER -p$TEST_DB_PASS -e "use $TEST_DB_NAME"; then
-      mysql -u root -p$MYSQL_ROOT_PASS -e "drop database $TEST_DB_NAME"
+    if [ ! -d "/var/lib/mysql/$TEST_DB_NAME" ]; then
+      mysql -u root -p$MYSQL_ROOT_PASS -e "create database $TEST_DB_NAME"
+      FRESHDB=1
     fi
-    mysql -u root -p$MYSQL_ROOT_PASS -e "create database $TEST_DB_NAME"
     mysql -u root -p$MYSQL_ROOT_PASS -e "grant usage on $TEST_DB_NAME.* to $TEST_DB_USER@localhost identified by '$TEST_DB_PASS'"
     mysql -u root -p$MYSQL_ROOT_PASS -e "grant all privileges on $TEST_DB_NAME.* to $TEST_DB_USER@localhost"
     mysql -u root -p$MYSQL_ROOT_PASS -e "flush privileges"
 
     # Drush setup
     #
-    curl -sS https://getcomposer.org/installer | php
-    mv composer.phar /usr/local/bin/composer
-    curl -sSO http://files.drush.org/drush.phar
-    chmod +x drush.phar
-    mv drush.phar /usr/local/bin/drush
+    if [ ! -f "/usr/local/bin/composer" ]; then
+      curl -sS https://getcomposer.org/installer | php
+      mv composer.phar /usr/local/bin/composer
+    fi
+    if [ ! -f "/usr/local/bin/drush" ]; then
+      curl -sSO http://files.drush.org/drush.phar
+      chmod +x drush.phar
+      mv drush.phar /usr/local/bin/drush
+    fi
     su - vagrant -c "drush init -y"
 
 
     # Drupal initialization 
+    # rebuilds site on each provision
     #
     echo "Downloading drupal8..."
     if [ -d "/home/vagrant/drupal8" ]; then
@@ -73,7 +76,10 @@ Vagrant.configure(2) do |config|
     cp /home/vagrant/drupal8/sites/default/default.settings.php /home/vagrant/drupal8/sites/$SITENAME/settings.php
     cp /home/vagrant/drupal8/sites/example.sites.php /home/vagrant/drupal8/sites/sites.php
     echo "\\$sites['$SITE_DOMAIN'] = '$SITENAME';" >> /home/vagrant/drupal8/sites/sites.php
+
     echo "\\$databases['default']['default'] = array('driver' => 'mysql', 'database' => '$TEST_DB_NAME', 'username' => '$TEST_DB_USER', 'password' => '$TEST_DB_PASS', 'host' => 'localhost');" >> /home/vagrant/drupal8/sites/test/settings.php
+    echo "\\$settings['hash_salt'] = '$HASH_SALT';" >> /home/vagrant/drupal8/sites/$SITENAME/settings.php
+    echo "\\$config_directories['sync'] = '/vagrant/config';" >> /home/vagrant/drupal8/sites/$SITENAME/settings.php
     chown -R vagrant:vagrant /home/vagrant/drupal8
     chown -R www-data:www-data /home/vagrant/drupal8/sites/$SITENAME/files
 
@@ -96,25 +102,25 @@ Vagrant.configure(2) do |config|
     cd /home/vagrant/drupal8
     rm -r modules && ln -s /vagrant/modules . 
     rm -r themes && ln -s /vagrant/themes .
-    echo "installing drupal..."
-    cd /home/vagrant/drupal8/sites/$SITENAME && drush site-install -y && cd -
-    chown -R www-data:www-data /home/vagrant/drupal8/sites/$SITENAME/files
+
+    if [ $FRESHDB ]; then
+      echo "installing drupal..."
+      cd /home/vagrant/drupal8/sites/$SITENAME && drush site-install -y && cd -
+      chown -R www-data:www-data /home/vagrant/drupal8/sites/$SITENAME/files
+    fi
 
     # drush alias setup
     DRUSHFILE=/home/vagrant/.drush/$SITENAME.aliases.drushrc.php
-    if [ -f "$DRUSHFILE" ]; then
-      rm $DRUSHFILE
+    if [ ! -f "$DRUSHFILE" ]; then
+      touch $DRUSHFILE && echo "<?php" >> $DRUSHFILE
+      cd /home/vagrant/drupal8/sites/$SITENAME
+      drush sa @self --full --with-optional >> /home/vagrant/.drush/$SITENAME.aliases.drushrc.php
+      sed -i "s/self/local/g" /home/vagrant/.drush/$SITENAME.aliases.drushrc.php
     fi
-    touch $DRUSHFILE && echo "<?php" >> $DRUSHFILE
-    cd /home/vagrant/drupal8/sites/$SITENAME
-    drush sa @self --full --with-optional >> /home/vagrant/.drush/$SITENAME.aliases.drushrc.php
-    sed -i "s/self/local/g" /home/vagrant/.drush/$SITENAME.aliases.drushrc.php
-
     #set drush site on login
-    DRUSHCMD=drush site-set @local
-    if ! grep -Fxq "DRUSHCMD" /home/vagrant/.bashrc; then
-      echo "drush site-set @local" >> /home/vagrant/.bashrc
+    DRUSHCMD="drush site-set @local"
+    if ! grep -Fxq "$DRUSHCMD" /home/vagrant/.bashrc; then
+      echo "$DRUSHCMD" >> /home/vagrant/.bashrc
     fi
   SHELL
-
 end
