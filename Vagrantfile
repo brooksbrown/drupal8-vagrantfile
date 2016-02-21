@@ -18,32 +18,30 @@ Vagrant.configure(2) do |config|
     TEST_DB_PASS=vagrant
     MYSQL_ROOT_PASS=vagrant
     
+
+    # LAMP stack setup
+    #
     apt-get update
     apt-get install -y debconf git
-
-    # LAMP Stack
-    #
     echo "mysql-server-5.5 mysql-server/root_password_again password $MYSQL_ROOT_PASS" | debconf-set-selections
     echo "mysql-server-5.5 mysql-server/root_password password $MYSQL_ROOT_PASS" | debconf-set-selections
     apt-get install -y lamp-server^
     apt-get install -y mysql-client php5-dev php5-gd php5-curl
     pecl install uploadprogress
-    
     if ! grep -Fxq "extension=uploadprogress.so" /etc/php5/apache2/php.ini; then
       echo "extension=uploadprogress.so" >> /etc/php5/apache2/php.ini
     fi
-
     a2enmod rewrite
     a2enmod headers
-
     # allow htaccess files
     sed -i "s/AllowOverride None/AllowOverride All/" /etc/apache2/apache2.conf
-
     service apache2 restart
 
 
     # Test database creation
     #
+    # if the database already exists, it is dropped on provisioning
+    # 
     if mysql -u $TEST_DB_USER -p$TEST_DB_PASS -e "use $TEST_DB_NAME"; then
       mysql -u root -p$MYSQL_ROOT_PASS -e "drop database $TEST_DB_NAME"
     fi
@@ -52,13 +50,15 @@ Vagrant.configure(2) do |config|
     mysql -u root -p$MYSQL_ROOT_PASS -e "grant all privileges on $TEST_DB_NAME.* to $TEST_DB_USER@localhost"
     mysql -u root -p$MYSQL_ROOT_PASS -e "flush privileges"
 
+    # Drush setup
+    #
     curl -sS https://getcomposer.org/installer | php
     mv composer.phar /usr/local/bin/composer
-
     curl -sSO http://files.drush.org/drush.phar
     chmod +x drush.phar
     mv drush.phar /usr/local/bin/drush
-    drush init
+    su - vagrant -c "drush init -y"
+
 
     # Drupal initialization 
     #
@@ -83,12 +83,38 @@ Vagrant.configure(2) do |config|
     if [ ! -d "/vagrant/modules" ]; then
       mkdir -p /vagrant/modules
     fi
+    if [ ! -d "/vagrant/themes" ]; then
+      mkdir -p /vagrant/themes
+    fi
 
-    cd /home/vagrant/drupal8 && rm -r modules && ln -s /vagrant/modules . && cd -
+    # backup config folder, if one exists
+    if [ -d "/vagrant/config" ]; then
+      mv /vagrant/config /vagrant/config."$(date +%s)".bak
+    fi
+    mkdir /vagrant/config
 
+    cd /home/vagrant/drupal8
+    rm -r modules && ln -s /vagrant/modules . 
+    rm -r themes && ln -s /vagrant/themes .
     echo "installing drupal..."
     cd /home/vagrant/drupal8/sites/$SITENAME && drush site-install -y && cd -
     chown -R www-data:www-data /home/vagrant/drupal8/sites/$SITENAME/files
+
+    # drush alias setup
+    DRUSHFILE=/home/vagrant/.drush/$SITENAME.aliases.drushrc.php
+    if [ -f "$DRUSHFILE" ]; then
+      rm $DRUSHFILE
+    fi
+    touch $DRUSHFILE && echo "<?php" >> $DRUSHFILE
+    cd /home/vagrant/drupal8/sites/$SITENAME
+    drush sa @self --full --with-optional >> /home/vagrant/.drush/$SITENAME.aliases.drushrc.php
+    sed -i "s/self/local/g" /home/vagrant/.drush/$SITENAME.aliases.drushrc.php
+
+    #set drush site on login
+    DRUSHCMD=drush site-set @local
+    if ! grep -Fxq "DRUSHCMD" /home/vagrant/.bashrc; then
+      echo "drush site-set @local" >> /home/vagrant/.bashrc
+    fi
   SHELL
 
 end
